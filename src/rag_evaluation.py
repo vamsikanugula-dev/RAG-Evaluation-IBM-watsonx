@@ -1,31 +1,19 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# ### api key:jVMXkQMygbMBIAFnnp-UcXHzP8TcJXej-d8lJr6FCmn2
-# ### projectid:e88ae624-24be-435f-bc21-d33e4b5326a7
-# 
-
 # In[1]:
 
 
 get_ipython().run_line_magic('pip', 'install -U  langchain  langchain-community  langchain-text-splitters  langchain-core  langchain-ibm  langchain-huggingface  sentence-transformers  transformers  beautifulsoup4  faiss-cpu')
 get_ipython().system('pip install -U langchain-experimental')
+get_ipython().run_line_magic('pip', 'install ragas datasets')
 
 
-# In[3]:
+# In[2]:
 
 
 import getpass
 import requests
-
-from bs4 import BeautifulSoup
-
-from langchain_community.document_loaders import WebBaseLoader
-
-from langchain_text_splitters import (
-    RecursiveCharacterTextSplitter,
-    CharacterTextSplitter,
-)
 
 from langchain_huggingface import HuggingFaceEmbeddings
 
@@ -38,7 +26,7 @@ from ibm_watsonx_ai.metanames import (
 )
 
 
-# In[4]:
+# In[3]:
 
 
 WATSONX_APIKEY = getpass.getpass(
@@ -52,7 +40,7 @@ WATSONX_PROJECT_ID = getpass.getpass(
 URL = "https://eu-de.ml.cloud.ibm.com"
 
 
-# In[5]:
+# In[4]:
 
 
 from ibm_watsonx_ai import Credentials
@@ -65,321 +53,441 @@ credentials = Credentials(
 print("Credentials created successfully!")
 
 
-# In[6]:
+# In[5]:
 
 
-from langchain_ibm import WatsonxLLM
+from langchain_ibm import ChatWatsonx
 from ibm_watsonx_ai.metanames import GenTextParamsMetaNames as GenParams
 
 parameters = {
-    GenParams.DECODING_METHOD: "greedy",
-    GenParams.MAX_NEW_TOKENS: 256,
+    GenParams.MAX_NEW_TOKENS: 2048,
     GenParams.TEMPERATURE: 0.0,
 }
 
-
-
-llm = WatsonxLLM(
-    model_id='mistralai/mistral-small-3-1-24b-instruct-2503',
+llm = ChatWatsonx(
+    model_id="mistralai/mistral-small-3-1-24b-instruct-2503",
     url=URL,
     apikey=WATSONX_APIKEY,
     project_id=WATSONX_PROJECT_ID,
     params=parameters,
 )
 
-print("LLM created successfully!")
 
-
-# In[7]:
-
-
-url = "https://www.ibm.com/new/announcements/ibm-granite-3-1-powerful-performance-long-context-and-more"
-
-doc = WebBaseLoader(url).load()
-
-
-# In[8]:
+# In[6]:
 
 
 from langchain_huggingface import HuggingFaceEmbeddings
 embeddings_model = HuggingFaceEmbeddings(model_name="ibm-granite/granite-embedding-30m-english")
 
 
-# In[9]:
+# In[7]:
 
 
-from transformers import AutoTokenizer
-from langchain_text_splitters import CharacterTextSplitter
+import pickle
 
-tokenizer = AutoTokenizer.from_pretrained(
-    "ibm-granite/granite-3.1-8b-instruct"
+with open("saved_rag/documents.pkl", "rb") as f:
+    documents = pickle.load(f)
+
+with open("saved_rag/fixed_size_chunks.pkl", "rb") as f:
+    fixed_size_chunks = pickle.load(f)
+
+with open("saved_rag/final_semantics.pkl", "rb") as f:
+    semantic_chunks = pickle.load(f)
+
+with open("saved_rag/propositions_chunks.pkl", "rb") as f:
+    propositions_chunks = pickle.load(f)
+
+with open("saved_rag/child_splitter1.pkl", "rb") as f:
+    child_splitter = pickle.load(f)
+
+with open("saved_rag/parent_splitter1.pkl", "rb") as f:
+    parent_splitter = pickle.load(f)
+
+
+# In[8]:
+
+
+from langchain_community.vectorstores import FAISS
+vector_dbfixed = FAISS.load_local(
+    "saved_rag/faiss_index_fixed",
+    embeddings_model,
+    allow_dangerous_deserialization=True
 )
 
-text_splitter = CharacterTextSplitter.from_huggingface_tokenizer(
-    tokenizer,
-    separator="\n",
-    chunk_size=1200,
-    chunk_overlap=200,
+vector_dbsemantic = FAISS.load_local(
+    "saved_rag/faiss_index_semantic",
+    embeddings_model,
+    allow_dangerous_deserialization=True
 )
 
-fixed_size_chunks = text_splitter.create_documents([doc[0].page_content])
-chunks = text_splitter.create_documents([doc[0].page_content])
+vector_dbpropos = FAISS.load_local(
+    "saved_rag/faiss_index_propos",
+    embeddings_model,
+    allow_dangerous_deserialization=True
+)
 
+vector_dbrecursive = FAISS.load_local(
+    "saved_rag/faiss_index_recursive",
+    embeddings_model,
+    allow_dangerous_deserialization=True
+)
+
+vector_dbparent = FAISS.load_local(
+    "saved_rag/faiss_index_parent",
+    embeddings_model,
+    allow_dangerous_deserialization=True
+)
 
 
 # In[10]:
 
 
-from langchain_core.documents import Document
-proposition_prompt = """
-Convert the following text into independent factual statements.
+from langchain_classic.retrievers.parent_document_retriever import ParentDocumentRetriever
+from langchain_classic.storage import InMemoryStore
 
-Rules:
-- Each statement should contain only one fact.
-- Do not add new information.
-- Return only bullet points.
-
-Text:
-{text}
-"""
-
-propositions_chunks = []
-
-for chunk in chunks:
-
-    response = llm.invoke(
-        proposition_prompt.format(
-            text=chunk.page_content
-        )
-    )
-
-    proposition_doc = Document(
-        page_content=response,
-        metadata={}
-    )
-
-    propositions_chunks.append(proposition_doc)
-    
+store = InMemoryStore()
+vectorstore = vector_dbparent
+retriever_chunks = ParentDocumentRetriever(vectorstore=vectorstore,docstore=store,child_splitter=child_splitter,parent_splitter=parent_splitter)
+retriever_chunks.add_documents(documents)
 
 
 # In[11]:
 
 
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-
-
-text_splitter = RecursiveCharacterTextSplitter(chunk_size=100, chunk_overlap=0)
-
-recursive_chunks = text_splitter.create_documents([doc[0].page_content])
-
-
-# In[12]:
-
-
-from langchain_classic.retrievers.parent_document_retriever import ParentDocumentRetriever
-from langchain_community.vectorstores import FAISS
-from langchain_classic.storage import InMemoryStore
-
-parent_splitter = RecursiveCharacterTextSplitter(chunk_size=800,chunk_overlap=100)
-
-child_splitter = RecursiveCharacterTextSplitter(chunk_size=250,chunk_overlap=50)
-
-vectorstore = FAISS.from_texts(texts=["dummy"],embedding=embeddings_model)
-vectorstore.delete(list(vectorstore.index_to_docstore_id.values()))
-
-store = InMemoryStore()
-
-retriever_chunks = ParentDocumentRetriever(vectorstore=vectorstore,docstore=store,child_splitter=child_splitter,parent_splitter=parent_splitter)
-
-
-documents = [doc[0]]
-
-# Split into parent documents
-parent_docs = parent_splitter.split_documents(documents)
-
-# Remove very small parent chunks (optional)
-filtered_parent_docs = [
-    d for d in parent_docs
-    if len(d.page_content.strip()) >= 200
+eval_questions = [
+    "What improvements does Granite 3.1 provide?",
+    "What is Granite Embedding used for?",
+    "What is the context length of Granite 3.1?"
 ]
 
-# Add to retriever
-retriever_chunks.add_documents(filtered_parent_docs)
 
-
-# In[13]:
-
-
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_experimental.text_splitter import SemanticChunker
-
-# First split by size
-recursive = RecursiveCharacterTextSplitter(
-    chunk_size=1200,
-    chunk_overlap=200
-)
-
-initial_chunks = recursive.split_documents([doc[0]])
-
-# Then semantic split
-semantic = SemanticChunker(embeddings_model)
-
-semantic_chunks = []
-
-for chunk in initial_chunks:
-    semantic_chunks.extend(
-        semantic.create_documents([chunk.page_content])
-    )
+ground_truth = [
+    "Granite 3.1 provides performance improvements, 128K context length, Granite Embedding models, and better hallucination detection.",
+    "Granite Embedding models are used for semantic search, vector search and RAG applications.",
+    "Granite 3.1 models support a 128K token context window."
+]
 
 
 # In[14]:
 
 
-final_semantic_chunks = [
-    doc for doc in semantic_chunks
-    if len(doc.page_content) >= 150
-]
+def run_rag(vector_db, query):
+
+    docs = vector_db.similarity_search(
+        query,
+        k=3
+     )
+
+    context = [doc.page_content for doc in docs]
+
+   
+
+    prompt = f"""
+    Answer only using the context.
+
+    Context:
+    {context}
+
+    Question:
+    {query}
+
+    Answer:
+    """
+
+    answer = llm.invoke(prompt)
+
+    return {
+        "question":query,
+        "answer":answer,
+        "contexts":context
+    }
+
+    
+def parent_run_rag(vector_db, query):
+
+    child_docs = vector_db.similarity_search(
+        query,
+        k=3
+     )
+    parent_ids = list(set([doc.metadata["doc_id"] for doc in child_docs]))
+
+    parent_docs = retriever_chunks.docstore.mget(parent_ids)
+    
+    context = [
+        doc.page_content for doc in parent_docs if doc is not None
+      ]
+
+   
+
+    prompt = f"""
+    Answer only using the context.
+
+    Context:
+    {context}
+
+    Question:
+    {query}
+
+    Answer:
+    """
+
+    answer = llm.invoke(prompt)
+
+    return {
+        "question":query,
+        "answer":answer,
+        "contexts":context
+    }    
 
 
-# In[15]:
+# In[27]:
 
 
-vector_dbsemantic = FAISS.from_documents(
-    final_semantic_chunks,
-    embeddings_model
+semantic_results=[]
+for q in eval_questions:
+    
+    result = run_rag(vector_dbsemantic,q)
+    semantic_results.append(result)
+
+
+propos_results=[]
+for q in eval_questions:
+
+    result = run_rag(vector_dbpropos ,q)
+
+    propos_results.append(result)
+
+
+parent_results = []
+for q in eval_questions:
+
+    result = parent_run_rag(vector_dbparent,q)
+
+    parent_results.append(result)    
+
+fixed_results = []
+
+for q in eval_questions:
+
+    result = run_rag(vector_dbfixed,q)
+
+    fixed_results.append(result) 
+    
+
+recursive_results = []
+
+
+for q in eval_questions:
+
+    result = run_rag(vector_dbrecursive,q)
+
+    recursive_results.append(result) 
+
+  
+    
+
+
+# In[28]:
+
+
+from datasets import Dataset
+
+
+semantic_dataset = Dataset.from_dict(
+  {
+    "question":[x["question"] for x in semantic_results],
+
+    "answer":[x["answer"].content for x in semantic_results],
+
+    "contexts":[x["contexts"] for x in semantic_results],
+
+    "ground_truth":ground_truth
+  }
+   )
+
+propos_dataset = Dataset.from_dict(
+{
+    "question":[x["question"] for x in propos_results],
+
+    "answer":[x["answer"].content for x in propos_results],
+
+    "contexts":[x["contexts"] for x in propos_results],
+
+    "ground_truth":ground_truth
+}
 )
-vector_dbfixed = FAISS.from_documents(
-    fixed_size_chunks,
-    embeddings_model
+
+parent_dataset = Dataset.from_dict(
+{
+    "question":[x["question"] for x in parent_results],
+
+    "answer":[x["answer"].content for x in parent_results],
+
+    "contexts":[x["contexts"] for x in parent_results],
+
+    "ground_truth":ground_truth
+}
 )
-vector_dbrecursive = FAISS.from_documents(
-    recursive_chunks,
-    embeddings_model
+
+fixed_dataset = Dataset.from_dict(
+{
+    "question":[x["question"] for x in fixed_results],
+
+    "answer":[x["answer"].content for x in fixed_results],
+
+    "contexts":[x["contexts"] for x in fixed_results],
+
+    "ground_truth":ground_truth
+}
 )
 
+recursive_dataset = Dataset.from_dict(
+{
+    "question":[x["question"] for x in recursive_results],
 
-print("FAISS vector database created successfully!")
+    "answer":[x["answer"].content for x in recursive_results],
 
+    "contexts":[x["contexts"] for x in recursive_results],
 
-# In[16]:
+    "ground_truth":ground_truth
+}
+)
 
-
-vector_dbparent = retriever_chunks.vectorstore
-print("FAISS vector database created successfully!")
 
 
 # In[17]:
 
 
-vector_dbpropos = FAISS.from_documents(
-    propositions_chunks,
-    embeddings_model
-)
+print(parent_dataset.features)
 
 
-# In[29]:
+# In[18]:
 
 
-import os
-
-os.makedirs("saved_rag", exist_ok=True)
-print("sucessful")
+for i, c in enumerate(parent_dataset[0]["contexts"]):
+    print(i, len(c))
 
 
 # In[19]:
 
 
-vector_dbfixed.save_local("faiss_index_fixed")
-
-vector_dbsemantic.save_local("faiss_index_semantic")
-
-vector_dbpropos.save_local("faiss_index_propos")
-
-vector_dbrecursive.save_local("faiss_index_recursive")
-
-vector_dbparent.save_local("faiss_index_parent")
+get_ipython().run_line_magic('pip', 'install langchain-google-vertexai')
 
 
 # In[20]:
 
 
-vector_dbfixed.save_local("saved_rag/faiss_index_fixed")
+import sys
+import langchain_google_vertexai
 
-vector_dbsemantic.save_local("saved_rag/faiss_index_semantic")
-
-vector_dbpropos.save_local("saved_rag/faiss_index_propos")
-
-vector_dbrecursive.save_local("saved_rag/faiss_index_recursive")
-
-vector_dbparent.save_local("saved_rag/faiss_index_parent")
-
-
-# In[21]:
-
-
-vector_dbsemantic = FAISS.load_local(
-    "faiss_index_semantic",
-    embeddings_model,
-    allow_dangerous_deserialization=True
-)
-vector_dbfixed = FAISS.load_local(
-    "faiss_index_fixed",
-    embeddings_model,
-    allow_dangerous_deserialization=True
-)
-vector_dbrecursive = FAISS.load_local(
-    "faiss_index_recursive",
-    embeddings_model,
-    allow_dangerous_deserialization=True
-)
-vector_dbpropos = FAISS.load_local(
-    "faiss_index_propos",
-    embeddings_model,
-    allow_dangerous_deserialization=True
-)
-vector_dbparent = FAISS.load_local(
-    "faiss_index_parent",
-    embeddings_model,
-    allow_dangerous_deserialization=True
-)
+sys.modules["langchain_community.chat_models.vertexai"] = langchain_google_vertexai
 
 
 # In[22]:
 
 
-import pickle
-with open("saved_rag/documents.pkl", "wb") as f:
-    pickle.dump(documents, f)
+from ragas.llms import LangchainLLMWrapper
+from ragas.embeddings import LangchainEmbeddingsWrapper
 
-with open("saved_rag/fixed_size_chunks.pkl", "wb") as f:
-    pickle.dump(fixed_size_chunks, f)
-    
-with open("saved_rag/final_semantics.pkl", "wb") as f:
-    pickle.dump(final_semantic_chunks, f)
-
-with open("saved_rag/propositions_chunks.pkl", "wb") as f:
-    pickle.dump(propositions_chunks, f)   
-
-with open("saved_rag/child_splitter1.pkl", "wb") as f:
-    pickle.dump(child_splitter, f)
-
-with open("saved_rag/parent_splitter1.pkl", "wb") as f:
-    pickle.dump(parent_splitter, f) 
-    
+evaluator_llm = LangchainLLMWrapper(llm)
+evaluator_embeddings = LangchainEmbeddingsWrapper(embeddings_model)
 
 
-# In[23]:
+# In[29]:
 
 
-import os
-print(os.listdir("saved_rag"))
+from ragas import evaluate
+
+from ragas.metrics import (
+    faithfulness,
+    answer_relevancy,
+    context_precision,
+    context_recall
+)
 
 
-# In[ ]:
+semantic_score = evaluate(
+    semantic_dataset,
+    metrics=[
+        faithfulness,
+        answer_relevancy,
+        context_precision,
+        context_recall
+    ],
+    llm=evaluator_llm,
+    embeddings=evaluator_embeddings
+)
 
 
+print(semantic_score)
 
+
+# In[30]:
+
+
+propos_score = evaluate(
+    propos_dataset,
+    metrics=[
+        faithfulness,
+        answer_relevancy,
+        context_precision,
+        context_recall
+    ],
+    llm=evaluator_llm,
+    embeddings=evaluator_embeddings
+)
+print(propos_score)
+
+
+# In[31]:
+
+
+parent_score = evaluate(
+    parent_dataset,
+    metrics=[
+        faithfulness,
+        answer_relevancy,
+        context_precision,
+        context_recall
+    ],
+    llm=evaluator_llm,
+    embeddings=evaluator_embeddings
+)
+print(parent_score)
+
+
+# In[32]:
+
+
+fixed_score = evaluate(
+    fixed_dataset,
+    metrics=[
+        faithfulness,
+        answer_relevancy,
+        context_precision,
+        context_recall
+    ],
+    llm=evaluator_llm,
+    embeddings=evaluator_embeddings
+)
+print(fixed_score)
+
+
+# In[33]:
+
+
+recursive_score = evaluate(
+    recursive_dataset,
+    metrics=[
+        faithfulness,
+        answer_relevancy,
+        context_precision,
+        context_recall
+    ],
+    llm=evaluator_llm,
+    embeddings=evaluator_embeddings
+)
+print(recursive_score)
 
 
 # In[ ]:
