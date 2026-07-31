@@ -1,0 +1,6 @@
+Strategy,Faithfulness,Answer Relevancy,Context Precision,Context Recall
+Semantic,0.8519,0.6386,0.2778,0.4167
+Proposition,0.6667,0.6121,0.3333,0.5833
+Parent Child,1.0000,0.6386,0.3333,0.4167
+Fixed Size,1.0000,0.9976,0.7778,1.0000
+Recursive,0.8333,0.6608,0.3333,0.4167
