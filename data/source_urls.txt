@@ -1,0 +1,8 @@
+Source URL:
+https://www.ibm.com/new/announcements/ibm-granite-3-1-powerful-performance-long-context-and-more
+
+Accessed:
+2026-08-02
+
+Used for:
+RAG chunking strategy evaluation
